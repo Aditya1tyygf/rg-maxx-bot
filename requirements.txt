@@ -1,0 +1,5 @@
+pyTelegramBotAPI
+aiohttp
+pycryptodome
+fastapi
+uvicorn
