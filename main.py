@@ -9,7 +9,7 @@ from Crypto.Cipher import AES
 import uvicorn
 
 # --- CONFIGURATIONS ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8271028373:AAF3DnEi9pXXS-kWRLbRQ9oHlR0Lw7GUG3k")
 CHANNEL_URL = "https://t.me/your_channel"
 LOGO_IMAGE_URL = "https://picsum.photos/800/400"
 
