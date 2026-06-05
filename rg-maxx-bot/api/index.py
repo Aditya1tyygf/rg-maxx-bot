@@ -298,16 +298,20 @@ async def handle_txt_to_html(message):
         await bot.delete_message(status.chat.id, status.message_id)
 
 # --- VERCEL ROUTE HANDLER ---
+# Post requests ke liye (Telegram updates)
+@app.post("/")
 @app.post("/api/index")
 async def process_update(request: Request):
-    """
-    Vercel is endpoint par Telegram se updates receive karega.
-    """
-    json_data = await request.json()
-    update = types.Update.de_json(json_data)
-    await bot.process_new_updates([update])
+    try:
+        json_data = await request.json()
+        update = types.Update.de_json(json_data)
+        await bot.process_new_updates([update])
+    except Exception as e:
+        print(f"Error processing update: {e}")
     return {"status": "ok"}
 
+# Get requests ke liye (Browser check)
+@app.get("/")
 @app.get("/api/index")
 def read_root():
-    return {"status": "Bot is running via Webhook on Vercel!"}
+    return {"status": "Bot is running successfully!"}
