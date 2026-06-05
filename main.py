@@ -9,7 +9,7 @@ from Crypto.Cipher import AES
 import uvicorn
 
 # --- CONFIGURATIONS ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8271028373:AAF3DnEi9pXXS-kWRLbRQ9oHlR0Lw7GUG3k")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHANNEL_URL = "https://t.me/your_channel"
 LOGO_IMAGE_URL = "https://picsum.photos/800/400"
 
@@ -22,7 +22,9 @@ PLAY_BASE_URL = "weathered-forest-6f0e.adityalkkumar4321.workers.dev/mp4"
 
 SEMAPHORE = asyncio.Semaphore(15)
 
-# Initialize FastAPI and Bot
+# Global memory to track user states
+USER_STATES = {}
+
 app = FastAPI()
 bot = AsyncTeleBot(BOT_TOKEN)
 
@@ -46,15 +48,16 @@ def decrypt_aes(encrypted_text: str, key: str, iv: str) -> str:
     except Exception:
         return encrypted_text
 
-# --- API HELPER FUNCTION ---
+# --- SAFE API HELPER ---
 async def fetch_json(session, url):
     async with SEMAPHORE:
         try:
             async with session.get(url, timeout=12) as r:
                 if r.status == 200:
-                    return await r.json()
-        except Exception:
-            pass
+                    data = await r.json()
+                    return data
+        except Exception as e:
+            print(f"API Error on {url}: {e}")
         return None
 
 # --- HTML TEMPLATE GENERATOR ---
@@ -145,51 +148,135 @@ async def check_joined_callback(call):
     await bot.answer_callback_query(call.id)
     await bot.send_message(call.message.chat.id, "Aapka swagat hai! Ab courses dekhne ke liye /maxx type karein.")
 
+# --- /maxx Options Screen ---
 @bot.message_handler(commands=['maxx'])
-async def show_courses(message):
-    status_msg = await bot.send_message(message.chat.id, "Getting courses, please wait...")
-    async with aiohttp.ClientSession() as session:
-        batches_data = await fetch_json(session, "https://rgmaxx-api.vercel.app/api/all-batches")
-        
-    if not batches_data:
-        await bot.edit_message_text("Kuch error aaya batches fetch karne me.", status_msg.chat.id, status_msg.message_id)
-        return
-        
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for batch in batches_data:
-        markup.add(types.InlineKeyboardButton(f"📘 {batch.get('name')}", callback_data=f"batch_{batch.get('id')}"))
-        
-    await bot.delete_message(status_msg.chat.id, status_msg.message_id)
-    await bot.send_message(message.chat.id, "📚 **Select your Course / Batch:**", reply_markup=markup, parse_mode="Markdown")
+async def show_menu(message):
+    # Clear any previous states
+    USER_STATES.pop(message.chat.id, None)
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_course = types.InlineKeyboardButton("📚 Course / Batches", callback_data="opt_course")
+    btn_html = types.InlineKeyboardButton("🔄 TXT to HTML", callback_data="opt_txt2html")
+    markup.add(btn_course, btn_html)
+    
+    await bot.send_message(
+        message.chat.id, 
+        "🔥 **RG Maxx Menu**\n\nNiche diye gaye options me se apna kaam select karein:", 
+        reply_markup=markup, 
+        parse_mode="Markdown"
+    )
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("batch_"))
-async def handle_batch_selection(call):
+@bot.callback_query_handler(func=lambda call: call.data in ["opt_course", "opt_txt2html"])
+async def handle_menu_selection(call):
     await bot.answer_callback_query(call.id)
-    batch_id = call.data.split("_")[1]
-    status_msg = await bot.edit_message_text("⏳ Processing... Batch details and links are being extracted.", call.message.chat.id, call.message.message_id)
+    chat_id = call.message.chat.id
+    
+    if call.data == "opt_course":
+        status_msg = await bot.send_message(chat_id, "🔍 Fetching all batches list, please wait...")
+        
+        async with aiohttp.ClientSession() as session:
+            batches_data = await fetch_json(session, "https://rgmaxx-api.vercel.app/api/all-batches")
+            
+        if not batches_data:
+            await bot.edit_message_text("❌ Batches list load nahi ho saki. Kripya thodi der baad try karein.", chat_id, status_msg.message_id)
+            return
+        
+        # Safe Parsing: Handle list or dictionary responses safely
+        batches_list = []
+        if isinstance(batches_data, list):
+            batches_list = batches_data
+        elif isinstance(batches_data, dict):
+            # If the response is a dictionary, extract the first list found
+            for key, val in batches_data.items():
+                if isinstance(val, list):
+                    batches_list = val
+                    break
+        
+        if not batches_list:
+            await bot.edit_message_text("❌ Kuch error aaya batches list check karne me.", chat_id, status_msg.message_id)
+            return
+
+        # Prepare Text List of Batches
+        list_text = "📚 **All Available Batches:**\n\n"
+        for idx, batch in enumerate(batches_list, 1):
+            b_id = batch.get('id')
+            b_name = batch.get('name')
+            list_text += f"{idx}. 🔹 **ID**: `{b_id}` \n   🏷️ **Name**: {b_name}\n\n"
+            
+        list_text += "👉 **Kripya niche is batch ki Course ID type karke send karein:**"
+        
+        # Set state to wait for course id input
+        USER_STATES[chat_id] = "waiting_for_course_id"
+        
+        await bot.delete_message(chat_id, status_msg.message_id)
+        await bot.send_message(chat_id, list_text, parse_mode="Markdown")
+        
+    elif call.data == "opt_txt2html":
+        await bot.send_message(chat_id, "🔄 **TXT to HTML Converter**\n\nKripya apni `.txt` link-file send karein, jise aap premium player me badalna chahte hain.")
+
+# --- Text Message Handler (For Course ID Input) ---
+@bot.message_handler(func=lambda msg: USER_STATES.get(msg.chat.id) == "waiting_for_course_id" and not msg.text.startswith('/'))
+async def process_course_id_input(message):
+    chat_id = message.chat.id
+    course_id = message.text.strip()
+    
+    # Reset State so it doesn't loop
+    USER_STATES.pop(chat_id, None)
+    
+    status_msg = await bot.send_message(chat_id, f"⚡ Course ID `{course_id}` received. Extracting subject, topics, and files in parallel...")
     
     async with aiohttp.ClientSession() as session:
-        subjects = await fetch_json(session, f"https://rgmaxx-api.vercel.app/api/get-subjects?courseid={batch_id}")
+        subjects_data = await fetch_json(session, f"https://rgmaxx-api.vercel.app/api/get-subjects?courseid={course_id}")
+        
+        # Handle list wrapping safely
+        subjects = []
+        if isinstance(subjects_data, list):
+            subjects = subjects_data
+        elif isinstance(subjects_data, dict):
+            for key, val in subjects_data.items():
+                if isinstance(val, list):
+                    subjects = val
+                    break
+                    
         if not subjects:
-            await bot.edit_message_text("Subjects fetch nahi ho paye.", status_msg.chat.id, status_msg.message_id)
+            await bot.edit_message_text("❌ Sahi Course ID nahi mili ya isme koi subjects nahi hain.", chat_id, status_msg.message_id)
             return
             
         final_structure = {}
         
+        # Fast concurrent execution block
         async def process_subject(subject):
             sub_id = subject.get('id')
             sub_name = subject.get('name')
-            topics = await fetch_json(session, f"https://rgmaxx-api.vercel.app/api/get-topics?courseid={batch_id}&subjectid={sub_id}")
-            if not topics: return
+            topics_data = await fetch_json(session, f"https://rgmaxx-api.vercel.app/api/get-topics?courseid={course_id}&subjectid={sub_id}")
             
+            topics = []
+            if isinstance(topics_data, list):
+                topics = topics_data
+            elif isinstance(topics_data, dict):
+                for k, v in topics_data.items():
+                    if isinstance(v, list):
+                        topics = v
+                        break
+                        
+            if not topics: return
             final_structure[sub_name] = {}
             
             async def process_topic(topic):
                 top_id = topic.get('id')
                 top_name = topic.get('name')
-                videos = await fetch_json(session, f"https://rgmaxx-api.vercel.app/api/get-videos?courseid={batch_id}&subjectid={sub_id}&topicid={top_id}")
-                if not videos: return
+                videos_data = await fetch_json(session, f"https://rgmaxx-api.vercel.app/api/get-videos?courseid={course_id}&subjectid={sub_id}&topicid={top_id}")
                 
+                videos = []
+                if isinstance(videos_data, list):
+                    videos = videos_data
+                elif isinstance(videos_data, dict):
+                    for k, v in videos_data.items():
+                        if isinstance(v, list):
+                            videos = v
+                            break
+                            
+                if not videos: return
                 final_structure[sub_name][top_name] = []
                 
                 async def process_video(video):
@@ -201,9 +288,9 @@ async def handle_batch_selection(call):
                     pdf1_dec = decrypt_aes(enc_pdf1, DECRYPT_KEY, DECRYPT_IV) if enc_pdf1 else ""
                     pdf2_dec = decrypt_aes(enc_pdf2, DECRYPT_KEY, DECRYPT_IV) if enc_pdf2 else ""
                     
-                    vid_details = await fetch_json(session, f"https://rgmaxx-api.vercel.app/api/get-video-details?course_id={batch_id}&video_id={vid_id}")
+                    vid_details = await fetch_json(session, f"https://rgmaxx-api.vercel.app/api/get-video-details?course_id={course_id}&video_id={vid_id}")
                     video_url_formatted = ""
-                    if vid_details:
+                    if vid_details and isinstance(vid_details, dict):
                         enc_link = vid_details.get('encrypted_links', '')
                         enc_key = vid_details.get('key', '')
                         dec_url = decrypt_aes(enc_link, DECRYPT_KEY, DECRYPT_IV)
@@ -219,10 +306,10 @@ async def handle_batch_selection(call):
         await asyncio.gather(*(process_subject(s) for s in subjects))
 
     if not final_structure:
-        await bot.edit_message_text("Data fetch nahi kiya ja saka.", status_msg.chat.id, status_msg.message_id)
+        await bot.edit_message_text("❌ Data process nahi ho paya. Sahi Course ID check karein.", chat_id, status_msg.message_id)
         return
 
-    # Create TXT in memory
+    # Generate txt content
     txt_content = ""
     for sub, topics in final_structure.items():
         txt_content += f"Subject: {sub}\n" + "="*40 + "\n"
@@ -236,18 +323,19 @@ async def handle_batch_selection(call):
                 txt_content += "\n"
 
     txt_bytes = txt_content.encode('utf-8')
-    html_content = generate_html(f"Batch {batch_id}", final_structure)
+    html_content = generate_html(f"Batch {course_id}", final_structure)
     html_bytes = html_content.encode('utf-8')
 
-    await bot.delete_message(status_msg.chat.id, status_msg.message_id)
+    await bot.delete_message(chat_id, status_msg.message_id)
     
-    await bot.send_document(call.message.chat.id, txt_bytes, visible_file_name=f"Batch_{batch_id}.txt", caption="📋 Here is your TXT File.")
-    await bot.send_document(call.message.chat.id, html_bytes, visible_file_name=f"Batch_{batch_id}.html", caption="🌐 Here is your Premium HTML Player.")
+    await bot.send_document(chat_id, txt_bytes, visible_file_name=f"Batch_{course_id}.txt", caption="📋 Batch text file generated.")
+    await bot.send_document(chat_id, html_bytes, visible_file_name=f"Batch_{course_id}.html", caption="🌐 Premium Player HTML generated.")
 
+# --- TXT TO HTML CONVERTER ---
 @bot.message_handler(content_types=['document'])
 async def handle_txt_to_html(message):
     if message.document.file_name.endswith('.txt'):
-        status = await bot.reply_to(message, "Converting your TXT to HTML format...")
+        status = await bot.reply_to(message, "⚙️ Processing your TXT to Premium HTML conversion...")
         file_info = await bot.get_file(message.document.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
         
@@ -290,7 +378,7 @@ async def handle_txt_to_html(message):
         html_out = generate_html(message.document.file_name.replace(".txt", ""), parsed_structure)
         html_bytes = html_out.encode('utf-8')
         
-        await bot.send_document(message.chat.id, html_bytes, visible_file_name=message.document.file_name.replace(".txt", ".html"), caption="✅ Converted HTML.")
+        await bot.send_document(message.chat.id, html_bytes, visible_file_name=message.document.file_name.replace(".txt", ".html"), caption="✅ Converted Premium HTML Player.")
         await bot.delete_message(status.chat.id, status.message_id)
 
 # --- RENDER WEBHOOK ROUTES ---
@@ -301,7 +389,7 @@ async def process_update(request: Request):
         update = types.Update.de_json(json_data)
         await bot.process_new_updates([update])
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error handling update: {e}")
     return {"status": "ok"}
 
 @app.get("/")
